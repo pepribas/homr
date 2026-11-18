@@ -407,6 +407,32 @@ barline . . . . ."""
         self.assertNotEqual(_voice(by_pitch["E"]), _voice(by_pitch["G"]))
         self.assertEqual(_voice(by_pitch["E"]), _voice(by_pitch["D"]))
 
+    def test_each_voice_of_a_staff_is_written_in_one_run(self) -> None:
+        # Players take the layer of a note from the last backup, not from its voice number,
+        # so notes of a voice must not be separated by notes of another voice.
+        unison = """clef_G2 _ _ _ _ upper
+keySignature_0 . . . . .
+timeSignature/4 . . . . .
+dynamic_mp _ _ _ _ upper
+note_8 B4 _ _ _ upper2&note_8 B4 _ _ _ upper
+note_8 A4 _ _ _ upper2&note_8 A4 _ _ _ upper
+note_4 G4 _ _ _ upper2&note_4 G4 _ _ _ upper
+barline . . . . ."""
+        tokens = read_token_lines(unison.splitlines())
+        xml = generate_xml(XmlGeneratorArguments(), [tokens], "")
+        measure = _first_measure(xml)
+
+        voices = [_voice(n) for n in _notes(measure)]
+        runs = [v for i, v in enumerate(voices) if i == 0 or v != voices[i - 1]]
+        self.assertEqual(len(set(voices)), 2)
+        self.assertEqual(len(runs), 2)
+        # Each voice keeps its notes and their lengths.
+        eighth = _duration(_notes(measure)[0])
+        for voice in set(voices):
+            durations = [_duration(n) for n in _notes(measure) if _voice(n) == voice]
+            self.assertEqual(durations, [eighth, eighth, 2 * eighth])
+        self.assertIsNotNone(measure.find("direction/direction-type/dynamics"))
+
     def test_begin_chord_with_standalone_rests(self) -> None:
         """
         If the lower position consists of a standalone rest then start the

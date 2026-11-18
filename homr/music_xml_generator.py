@@ -3,7 +3,7 @@
 import math
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -261,6 +261,8 @@ def build_part(
     convert_ties(part)
     add_stems(part)
     convert_beams(part)
+    for measure in part.iter("measure"):
+        group_measure_voices(measure)
     _remove_position_attributes(part)
     return part
 
@@ -778,6 +780,85 @@ def rebalance_measure_voices(measure: ET.Element) -> None:
                 voice_el = note.find("voice")
                 if voice_el is not None:
                     voice_el.text = xml_voice
+
+
+def _timed_children(children: Iterable[ET.Element]) -> list[tuple[int, ET.Element]]:
+    """The notes and directions of a measure with the time they start at, in divisions."""
+    result: list[tuple[int, ET.Element]] = []
+    time = 0
+    last_start = 0
+    for child in children:
+        if child.tag in ("backup", "forward"):
+            duration = int(child.findtext("duration", "0"))
+            time += -duration if child.tag == "backup" else duration
+        elif child.tag == "note":
+            if child.find("chord") is None:
+                last_start = time
+                time += int(child.findtext("duration", "0"))
+            result.append((last_start, child))
+        elif child.tag == "direction":
+            result.append((time, child))
+    return result
+
+
+def _move_in_time(body: list[ET.Element], time: int, target: int) -> int:
+    if target != time:
+        move = ET.Element("forward" if target > time else "backup")
+        ET.SubElement(move, "duration").text = str(abs(target - time))
+        body.append(move)
+    return target
+
+
+def group_measure_voices(measure: ET.Element) -> None:
+    """
+    Write the notes of each voice of a measure in one run.
+
+    A player takes the layer of a note from the last backup, not from its voice, so notes
+    of two voices which alternate without a backup in between end up in the same layer.
+    A measure stays as it is if it has more than notes, directions, backups and forwards
+    between its attributes and its barlines, or if the regrouped notes and directions
+    wouldn't all start at the time they did before.
+    """
+    children = list(measure)
+    first = next(
+        (i for i, c in enumerate(children) if c.tag not in ("attributes", "print")),
+        len(children),
+    )
+    last = len(children)
+    while last > first and children[last - 1].tag == "barline":
+        last -= 1
+    if any(c.tag not in ("note", "direction", "backup", "forward") for c in children[first:last]):
+        return
+
+    timed = _timed_children(children)
+    voices = [
+        c.findtext("voice", "1") for _, c in timed if c.tag == "note" and c.find("chord") is None
+    ]
+    runs = [voice for i, voice in enumerate(voices) if i == 0 or voice != voices[i - 1]]
+    if len(runs) == len(set(runs)):
+        return
+
+    body: list[ET.Element] = []
+    time = 0
+    for start, child in timed:
+        if child.tag == "direction":
+            time = _move_in_time(body, time, start)
+            body.append(child)
+    for voice in dict.fromkeys(runs):
+        for start, child in timed:
+            if child.tag != "note" or child.findtext("voice", "1") != voice:
+                continue
+            if child.find("chord") is None:
+                time = _move_in_time(body, time, start) + int(child.findtext("duration", "0"))
+            body.append(child)
+
+    regrouped = children[:first] + body + children[last:]
+
+    def fingerprint(elements: Iterable[ET.Element]) -> list[tuple[int, bytes]]:
+        return sorted((start, ET.tostring(child)) for start, child in _timed_children(elements))
+
+    if fingerprint(regrouped) == fingerprint(children):
+        measure[:] = regrouped
 
 
 # The position of the model (e.g. upper2) of a note while the part is built
